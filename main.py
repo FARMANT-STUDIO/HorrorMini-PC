@@ -1,0 +1,161 @@
+import os
+import datetime
+import random
+import math
+from pathlib import Path
+from ursina import *
+from ursina.prefabs.first_person_controller import FirstPersonController
+
+# ------------------------------------------------------------------
+# Proje Adı: HORROR MINI - BİLGİSAYAR EDİTİON
+# Sürüm: Alpha 0.03 | Geliştirici: STRLXY-B9Q (Farmant Studios)
+# Lisans: GNU GPL v3
+# ------------------------------------------------------------------
+
+def initialize_system():
+    appdata = Path(os.getenv('APPDATA')) / "HorrorMini"
+    for folder in ["Worlds", "Logs", "Chunks"]:
+        (appdata / folder).mkdir(parents=True, exist_ok=True)
+    return appdata
+
+save_path = initialize_system()
+app = Ursina()
+
+# --- AYARLAR ---
+window.title = 'HORROR MINI - ALPHA 0.03'
+window.borderless = False
+window.exit_button.visible = False
+window.color = color.black
+scene.fog_color = color.black
+scene.fog_density = (15, 45)
+Entity.default_shader = lit_with_shadows_shader
+sun = DirectionalLight()
+sun.look_at(Vec3(1, -1, 1))
+
+mats = {
+    'grass': color.color(120, 0.5, 0.3),
+    'dirt': color.brown,
+    'stone': color.dark_gray,
+    'sand': color.yellow,
+    'gravel': color.light_gray,
+    'water': color.blue,
+    'wood': color.orange,
+    'leaves': color.green
+}
+
+# --- DÜNYA MOTORU ---
+CHUNK_SIZE = 8
+RENDER_DISTANCE = 5
+loaded_chunks = {}
+
+def get_height(x, z):
+    h = math.sin(x * 0.1) * math.cos(z * 0.1) * 5
+    h += math.sin(x * 0.05) * 10 
+    return floor(h + 5)
+
+class Voxel(Button):
+    def __init__(self, position=(0,0,0), mat=mats['grass']):
+        super().__init__(
+            parent=scene, position=position, model='cube', origin_y=0.5,
+            texture='white_cube', color=mat, collider='box',
+            highlight_color=color.red, shader=lit_with_shadows_shader
+        )
+
+    def input(self, key):
+        if self.hovered:
+            if key == 'left mouse down': destroy(self)
+            if key == 'k': Voxel(position=self.position + mouse.normal, mat=mats['stone'])
+
+def spawn_tree(x, y, z, chunk_list):
+    tree_h = random.randint(3, 5)
+    for i in range(tree_h):
+        trunk = Voxel(position=(x, y+i, z), mat=mats['wood'])
+        chunk_list.append(trunk)
+    for lx in range(-1, 2):
+        for ly in range(2):
+            for lz in range(-1, 2):
+                leaf = Voxel(position=(x+lx, y+tree_h+ly, z+lz), mat=mats['leaves'])
+                chunk_list.append(leaf)
+
+def create_chunk(cx, cz):
+    chunk_entities = []
+    for x in range(cx * CHUNK_SIZE, (cx + 1) * CHUNK_SIZE):
+        for z in range(cz * CHUNK_SIZE, (cz + 1) * CHUNK_SIZE):
+            h = get_height(x, z)
+            cur_mat = mats['grass']
+            if h < 2: 
+                cur_mat = mats['sand']
+                water = Voxel(position=(x, 1, z), mat=mats['water'])
+                chunk_entities.append(water)
+            elif random.random() < 0.03: 
+                cur_mat = mats['gravel']
+
+            top = Voxel(position=(x, h, z), mat=cur_mat)
+            chunk_entities.append(top)
+            
+            if h > 0:
+                under = Voxel(position=(x, h-1, z), mat=mats['dirt'])
+                chunk_entities.append(under)
+                if random.random() > 0.15:
+                    stone = Voxel(position=(x, h-2, z), mat=mats['stone'])
+                    chunk_entities.append(stone)
+
+            if cur_mat == mats['grass'] and random.random() < 0.02:
+                spawn_tree(x, h+1, z, chunk_entities)
+    loaded_chunks[(cx, cz)] = chunk_entities
+
+def update_chunks():
+    cx, cz = floor(player.x / CHUNK_SIZE), floor(player.z / CHUNK_SIZE)
+    for x in range(cx - RENDER_DISTANCE, cx + RENDER_DISTANCE):
+        for z in range(cz - RENDER_DISTANCE, cz + RENDER_DISTANCE):
+            if (x, z) not in loaded_chunks: create_chunk(x, z)
+    to_del = [c for c in loaded_chunks if abs(c[0]-cx) > RENDER_DISTANCE or abs(c[1]-cz) > RENDER_DISTANCE]
+    for c in to_del:
+        for e in loaded_chunks[c]: destroy(e)
+        del loaded_chunks[c]
+
+# --- STALKER ---
+stalker = Entity(model='cube', color=color.white, scale=(1,2,1), enabled=False)
+stalker_timer = 0
+
+def teleport_stalker():
+    angle = random.uniform(0, math.pi * 2)
+    dist = random.uniform(25, 40)
+    nx, nz = player.x + math.cos(angle) * dist, player.z + math.sin(angle) * dist
+    h = get_height(nx, nz)
+    scen = random.choice(['top', 'cave', 'normal'])
+    if scen == 'top': stalker.position = (nx, h+1, nz)
+    elif scen == 'cave': stalker.position = (nx, max(1, h-2), nz)
+    else: stalker.position = (nx, h+1, nz)
+    stalker.look_at(player.position)
+
+# --- BASLATMA ---
+player = FirstPersonController(enabled=False, y=30)
+title = Text(text='HORROR MINI\n<red>BILGISAYAR EDITION<default>', origin=(0,0), scale=3, background=True)
+info = Text(text='[SPACE] BASLAT', origin=(0,-8), scale=1)
+
+def start_game():
+    title.enabled = False
+    info.enabled = False
+    player.enabled = True
+    stalker.enabled = True
+    mouse.locked = True
+    teleport_stalker()
+
+def input(key):
+    if key == 'space' and not player.enabled: start_game()
+    if key == 'escape': application.quit()
+
+def update():
+    global stalker_timer
+    if player.enabled:
+        update_chunks()
+        stalker.look_at(player.position)
+        stalker_timer += time.dt
+        if stalker_timer > random.uniform(20, 40):
+            teleport_stalker()
+            stalker_timer = 0
+        if distance(stalker.position, player.position) < 15:
+            stalker.position += stalker.forward * time.dt * 2.2
+
+app.run()
